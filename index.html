@@ -63,12 +63,17 @@
   #vrButton:hover:not(:disabled) { background: #2f7de1; }
   #vrButton:disabled { background: #4a5260; cursor: default; font-size: 14px; }
   #hint { position: fixed; bottom: 10px; left: 12px; color: #1d2a3a; font-size: 12px; opacity: .75; }
+  /* Stage 18: during a VR session the kiosk page stays alive, hidden, at exactly 1920 x 1080 so it can be drawn onto the in-VR panel */
+  #kioskOverlay.vr, #kioskOverlay.vr.open { inset: auto !important; left: 0 !important; top: 0 !important; width: 1920px !important; height: 1080px !important;
+    visibility: visible !important; opacity: 0 !important; pointer-events: none !important; transform: none !important; z-index: -1 !important; transition: none !important; }
+  #kioskOverlay.vr #kioskBar { display: none !important; }
+  #kioskOverlay.vr #kioskFrame { flex: none !important; width: 1920px !important; height: 1080px !important; transform: none !important; transition: none !important; }
 </style>
 </head>
 <body>
 
 <div id="panel">
-  <h1>Mall Simulation – Stage 17 (WebXR)</h1>
+  <h1>Mall Simulation – Stage 18 (WebXR + kiosk in VR)</h1>
   <div class="sub">Three shop rows, two corridors: Shop &ndash; Corridor &ndash; Shop &ndash; Corridor &ndash; Shop</div>
 
   <h2>Walk controls</h2>
@@ -83,6 +88,7 @@
     <tr><td><kbd>E</kbd></td><td>Use a lift (stand in front of its doors), then pick a floor</td></tr>
     <tr><td>Washrooms</td><td>Walk to either end of either corridor: Men's (south side) and Women's (north side), on all floors (4 blocks per floor)</td></tr>
     <tr><td>Wayfinding</td><td>Hanging signs show the floor, escalators and lifts; level-guide plaques sit beside each lift</td></tr>
+    <tr><td>Kiosk in VR</td><td>Walk up, press <kbd>A</kbd> / trigger. Point + trigger taps, thumbstick scrolls, grip recentres, <kbd>B</kbd> closes</td></tr>
     <tr><td>Second corridor</td><td>North of the middle shop row; reach it through the 6 m cross-links at both ends and in the centre of every floor</td></tr>
     <tr><td>Third floor</td><td>West half: cinema (box office in the corridor, foyer with food counter, Screens 1-3). East half: food court with 8 outlets and seating</td></tr>
     <tr><td>Shops</td><td>Walk in through any open entrance; the panel below shows which store you are in</td></tr>
@@ -3195,7 +3201,20 @@ function setupPlayer(App) {
     if (e.data.kioskReady) { kioskReady = true; sendKiosk(); }
     else if (e.data.kioskClose) closeKiosk(false);
   });
-  function interact() { if (App.xrActive) { const L = liftNear(); if (L) openLiftMenu(L); return; } const K = kioskNear(); if (K) { startKioskIntro(K); return; } const L = liftNear(); if (L) openLiftMenu(L); }
+  // ---- VR: the kiosk page is drawn onto a floating panel (see setupVRKiosk) ----
+  function openKioskXR(k) {
+    prompt.style.display = 'none';
+    pendingKiosk = { floor: k.floor, x: +k.x.toFixed(2), z: +k.z.toFixed(2) };
+    preloadKiosk(); sendKiosk();                                 // fresh session at the language screen, map centred on THIS kiosk
+    setState('kiosk');                                           // freezes walking; the headset keeps rendering
+    if (App.vrKiosk) App.vrKiosk.open(k);
+  }
+  function closeKioskXR() {
+    if (App.state !== 'kiosk') return;
+    setState('walk'); cooldown = 0.6;
+    if (App.vrKiosk) App.vrKiosk.close();
+  }
+  function interact() { if (App.xrActive) { const K = kioskNear(); if (K) { openKioskXR(K); return; } const L = liftNear(); if (L) openLiftMenu(L); return; } const K = kioskNear(); if (K) { startKioskIntro(K); return; } const L = liftNear(); if (L) openLiftMenu(L); }
 
   function checkInteractions(dt) {
     if (cooldown > 0) cooldown -= dt;
@@ -3251,14 +3270,17 @@ function setupPlayer(App) {
     if (document.pointerLockElement) document.exitPointerLock();
     if (App.state === 'orbit') { cam.up.set(0, 1, 0); }
     P.third = false;
+    kioskOverlay.classList.add('vr');    // kiosk page stays alive, hidden, at 1920 x 1080
+    preloadKiosk();
     setState('walk'); applyCamera();
   };
   App.vrExit = () => {
+    kioskOverlay.classList.remove('vr');
     App.rig.position.set(0, 0, 0); App.rig.rotation.set(0, 0, 0);
     cam.fov = 60; cam.aspect = window.innerWidth / window.innerHeight; cam.updateProjectionMatrix();
     setState('paused');                  // back on the desktop: camera returns to the player's view, click to resume
   };
-  App.playerApi = { update, interact, chooseLift, closeLift, liftNear, P };   // also handy for later stages / tests
+  App.playerApi = { update, interact, chooseLift, closeLift, liftNear, kioskNear, closeKioskXR, P };   // also handy for later stages / tests
   setState('menu');
 }
 
@@ -3976,7 +3998,7 @@ function setupVR(App) {
   const P = App.player;
   const btn = document.getElementById('vrButton');
   const rig = App.rig;
-  const vr = App.vr = { f: 0, s: 0, run: false, headYaw: 0 };
+  const vr = App.vr = { f: 0, s: 0, run: false, headYaw: 0, slots: null };
   const hands = {};                                  // 'left' / 'right' -> { ctrl, input, prev: [] }
 
   // ---- controllers (parented to the rig so they move with the player) ----
@@ -3997,6 +4019,8 @@ function setupVR(App) {
     rig.add(ctrl); rig.add(grip);
     slots.push(slot);
   }
+
+  vr.slots = slots;                                  // shared with the kiosk panel (setupVRKiosk)
 
   // ---- head-locked prompt ----
   function makeCanvasMesh(w, h, pw, ph) {
@@ -4103,7 +4127,7 @@ function setupVR(App) {
     let t = '';
     if (App.state === 'walk') {
       const near = document.getElementById('prompt').style.display === 'block';
-      if (near) t = App.playerApi.liftNear() ? 'Press A or trigger to use the lift' : 'Kiosks are not available in VR';
+      if (near) t = App.playerApi.kioskNear() ? 'Press A or trigger to use the kiosk' : 'Press A or trigger to use the lift';
     }
     setHud(t);
   }
@@ -4119,6 +4143,7 @@ function setupVR(App) {
   renderer.xr.addEventListener('sessionend', () => {
     App.xrActive = false; App.xrSession = null;
     hideLift(); setHud('');
+    if (App.vrKiosk) App.vrKiosk.close();
     App.vrExit();
     refreshButton();
   });
@@ -4139,6 +4164,248 @@ function setupVR(App) {
     } catch (e) { btn.textContent = 'Could not start VR: ' + (e && e.message || e); }
   });
   refreshButton();
+}
+
+/* =====================================================================
+   9b. STAGE 18 – KIOSK UI IN VR
+   A headset cannot show the kiosk's HTML page, so while you are in VR the page keeps running hidden in its iframe at exactly
+   1920 x 1080, and a world-space panel shows a live picture of it. The picture is taken with the html-to-image library
+   (loaded from a CDN into the kiosk page on demand) after every interaction, and the controller ray is turned back into mouse /
+   pointer events inside the page, so every screen works as on the real kiosk: language, directory, map (drag + zoom), movies and
+   seats, snacks, food court, reservations, car finder, feedback.
+   Walk up to a kiosk, press A or the trigger  ->  the panel appears in front of you.
+   Point + trigger (or A) = tap / drag · thumbstick = scroll · grip = bring the panel back in front of you · B / Y = close
+   ===================================================================== */
+function setupVRKiosk(App) {
+  const UI_W = 1920, UI_H = 1080, PW = 1440, PH = 810;                       // kiosk page size / panel texture size
+  const PANEL_W = 1.8, PANEL_H = PANEL_W * UI_H / UI_W, BAR_W = 1440, BAR_PX = 120, BAR_H = PANEL_W * BAR_PX / BAR_W, DIST = 1.1;
+  const LIB_URL = 'https://cdn.jsdelivr.net/npm/html-to-image@1.11.11/dist/html-to-image.js';
+  const frame = document.getElementById('kioskFrame');
+  const scene = App.scene, cam = App.camera, vr = App.vr;
+  if (!frame || !vr) return;
+
+  /* ---------- the panel (picture of the kiosk page + a small button bar under it) ---------- */
+  const group = new THREE.Group(); group.name = 'vrKiosk'; group.visible = false; scene.add(group);
+  const pc = document.createElement('canvas'); pc.width = PW; pc.height = PH; const pg = pc.getContext('2d');
+  const ptex = new THREE.CanvasTexture(pc); ptex.colorSpace = THREE.SRGBColorSpace; ptex.anisotropy = 8;
+  const panel = new THREE.Mesh(new THREE.PlaneGeometry(PANEL_W, PANEL_H), new THREE.MeshBasicMaterial({ map: ptex, toneMapped: false, depthTest: false, fog: false }));
+  panel.renderOrder = 990; group.add(panel);
+  const bc = document.createElement('canvas'); bc.width = BAR_W; bc.height = BAR_PX; const bg = bc.getContext('2d');
+  const btex = new THREE.CanvasTexture(bc); btex.colorSpace = THREE.SRGBColorSpace;
+  const bar = new THREE.Mesh(new THREE.PlaneGeometry(PANEL_W, BAR_H), new THREE.MeshBasicMaterial({ map: btex, transparent: true, toneMapped: false, depthTest: false, fog: false }));
+  bar.position.y = -(PANEL_H / 2 + BAR_H / 2 + 0.03); bar.renderOrder = 990; group.add(bar);
+  const cursor = new THREE.Mesh(new THREE.RingGeometry(0.010, 0.019, 24), new THREE.MeshBasicMaterial({ color: 0x1e66d0, side: THREE.DoubleSide, transparent: true, depthTest: false, fog: false }));
+  cursor.renderOrder = 995; cursor.visible = false; group.add(cursor);
+
+  const BTN = { recenter: { x0: 24, x1: 330, label: 'Recenter' }, close: { x0: 1110, x1: 1416, label: 'Close kiosk' } };
+  let active = false, busy = false, again = false, ready = false, err = '', hoverBtn = '';
+  let lib = null, fontCSS = null, debTimer = 0, settleTimer = 0, idle = 0, lastScrollShot = 0;
+  let down = null;                                                           // { s, x, y, lx, ly, travel } while a press is held on the panel
+  let lastUI = null;                                                         // kiosk-page coordinates currently pointed at
+
+  function roundRect(g, x, y, w, h, r) { g.beginPath(); g.roundRect(x, y, w, h, r); }
+  function drawBar() {
+    bg.clearRect(0, 0, BAR_W, BAR_PX);
+    bg.fillStyle = 'rgba(15,20,30,0.92)'; roundRect(bg, 0, 0, BAR_W, BAR_PX, 30); bg.fill();
+    bg.textAlign = 'center'; bg.textBaseline = 'middle';
+    for (const k in BTN) {
+      const b = BTN[k];
+      bg.fillStyle = hoverBtn === k ? '#2f7de1' : (k === 'close' ? '#b3261e' : '#364152');
+      roundRect(bg, b.x0, 14, b.x1 - b.x0, 92, 22); bg.fill();
+      bg.fillStyle = '#fff'; bg.font = 'bold 36px sans-serif'; bg.fillText(b.label, (b.x0 + b.x1) / 2, 61);
+    }
+    bg.fillStyle = busy ? '#ffd9a0' : '#b8c4d3'; bg.font = '28px sans-serif';
+    bg.fillText(busy ? 'Updating…' : 'Trigger / A = tap · stick = scroll · grip = recentre · B = close', BAR_W / 2, 61);
+    btex.needsUpdate = true;
+  }
+  function drawPanelMsg(lines) {
+    pg.fillStyle = '#0f141e'; pg.fillRect(0, 0, PW, PH);
+    pg.fillStyle = '#fff'; pg.textAlign = 'center'; pg.textBaseline = 'middle';
+    lines.forEach((t, i) => { pg.font = i ? '34px sans-serif' : 'bold 56px sans-serif'; pg.fillText(t, PW / 2, PH / 2 - 40 + i * 70); });
+    ptex.needsUpdate = true;
+  }
+
+  const v1 = new THREE.Vector3(), v2 = new THREE.Vector3();
+  function place() {                                                         // float the panel in front of the head, facing it
+    cam.getWorldPosition(v1); cam.getWorldDirection(v2); v2.y = 0;
+    if (v2.lengthSq() < 1e-4) v2.set(0, 0, -1); v2.normalize();
+    group.position.set(v1.x + v2.x * DIST, v1.y - 0.12, v1.z + v2.z * DIST);
+    group.lookAt(v1.x, group.position.y, v1.z);
+    group.updateMatrixWorld(true);
+  }
+
+  /* ---------- picture of the kiosk page ---------- */
+  function ensureLib() {
+    if (lib) return lib;
+    lib = new Promise((res, rej) => {
+      const win = frame.contentWindow, doc = frame.contentDocument;
+      if (!win || !doc || !doc.head) { lib = null; return rej(new Error('kiosk page is still loading')); }
+      if (win.htmlToImage) return res(win.htmlToImage);
+      const s = doc.createElement('script'); s.src = LIB_URL;
+      s.onload = () => win.htmlToImage ? res(win.htmlToImage) : (lib = null, rej(new Error('renderer did not initialise')));
+      s.onerror = () => { lib = null; rej(new Error('could not load html-to-image (network?)')); };
+      doc.head.appendChild(s);
+    });
+    return lib;
+  }
+  async function snapshot() {
+    if (!active) return;
+    if (busy) { again = true; return; }
+    busy = true; drawBar();
+    try {
+      const h2i = await ensureLib();
+      const doc = frame.contentDocument, root = doc && doc.getElementById('kiosk-root');
+      if (!root) throw new Error('kiosk is still starting');
+      if (fontCSS === null) { try { fontCSS = await h2i.getFontEmbedCSS(root); } catch (e) { fontCSS = ''; } }      // web fonts + icon font, embedded once and reused
+      const c = await h2i.toCanvas(root, { width: UI_W, height: UI_H, canvasWidth: PW, canvasHeight: PH, pixelRatio: 1, fontEmbedCSS: fontCSS, backgroundColor: '#ffffff', cacheBust: false });
+      if (!active) return;
+      pg.drawImage(c, 0, 0, PW, PH); ptex.needsUpdate = true; ready = true; err = '';
+    } catch (e) {
+      err = (e && e.message) || String(e);
+      console.warn('[vr-kiosk]', e);
+      if (!ready) drawPanelMsg(['Kiosk is starting…', err.slice(0, 90)]);
+      if (active) { clearTimeout(settleTimer); settleTimer = setTimeout(snapshot, 2500); }                                  // try again
+    } finally { busy = false; drawBar(); if (again) { again = false; clearTimeout(debTimer); debTimer = setTimeout(snapshot, 60); } }
+  }
+  function afterInteract() {                                                 // one picture soon, one more after transitions settle
+    idle = 0;
+    clearTimeout(debTimer); debTimer = setTimeout(snapshot, 160);
+    clearTimeout(settleTimer); settleTimer = setTimeout(snapshot, 900);
+  }
+
+  /* ---------- controller ray -> mouse / pointer events inside the kiosk page ---------- */
+  function fire(type, x, y, buttons) {
+    const win = frame.contentWindow, doc = frame.contentDocument; if (!win || !doc) return;
+    const el = doc.elementFromPoint(x, y) || doc.body;
+    const base = { bubbles: true, cancelable: true, composed: true, view: win, clientX: x, clientY: y, screenX: x, screenY: y, button: 0, buttons };
+    const ev = type.startsWith('pointer')
+      ? new win.PointerEvent(type, { ...base, pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1, pressure: buttons ? 0.5 : 0 })
+      : new win.MouseEvent(type, base);
+    el.dispatchEvent(ev);
+  }
+  function scrollAt(x, y, dx, dy) {                                          // thumbstick: scroll the scrollable area under the pointer
+    const win = frame.contentWindow, doc = frame.contentDocument; if (!win || !doc) return false;
+    let el = doc.elementFromPoint(x, y);
+    while (el && el !== doc.documentElement) {
+      const cs = win.getComputedStyle(el);
+      const canY = dy && (cs.overflowY === 'auto' || cs.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 1;
+      const canX = dx && (cs.overflowX === 'auto' || cs.overflowX === 'scroll') && el.scrollWidth > el.clientWidth + 1;
+      if (canY || canX) { if (canY) el.scrollTop += dy; if (canX) el.scrollLeft += dx; return true; }
+      el = el.parentElement;
+    }
+    return false;
+  }
+  const buzz = s => { try { const h = s.input.gamepad.hapticActuators && s.input.gamepad.hapticActuators[0]; if (h && h.pulse) h.pulse(0.35, 35); } catch (e) {} };
+
+  const ray = new THREE.Raycaster(), tmpM = new THREE.Matrix4(), local = new THREE.Vector3();
+  const btnState = (gp, i) => !!(gp.buttons[i] && gp.buttons[i].pressed);
+  const dead = v => Math.abs(v) < 0.2 ? 0 : v;
+
+  function update(dt) {
+    if (!active) return;
+    if (App.state !== 'kiosk' || !App.xrActive) { close(); return; }
+    idle += dt; if (idle > 20) { idle = 0; clearTimeout(debTimer); debTimer = setTimeout(snapshot, 10); }     // keep the clock fresh
+
+    const entries = [];
+    let closeNow = false, recenter = false;
+    for (const s of vr.slots) {
+      if (!s.input || !s.input.gamepad) continue;
+      const gp = s.input.gamepad;
+      const sel = btnState(gp, 0) || btnState(gp, 4), grip = btnState(gp, 1), bb = btnState(gp, 5);
+      const e = { s, press: sel && !s.kSel, release: !sel && !!s.kSel, sel, ax: gp.axes || [] };
+      if (bb && !s.kB) closeNow = true;
+      if (grip && !s.kGrip) recenter = true;
+      s.kSel = sel; s.kGrip = grip; s.kB = bb;
+      tmpM.identity().extractRotation(s.ctrl.matrixWorld);
+      ray.ray.origin.setFromMatrixPosition(s.ctrl.matrixWorld);
+      ray.ray.direction.set(0, 0, -1).applyMatrix4(tmpM);
+      e.hitP = ray.intersectObject(panel, false)[0] || null;
+      e.hitB = ray.intersectObject(bar, false)[0] || null;
+      entries.push(e);
+    }
+    if (closeNow) { App.playerApi.closeKioskXR(); return; }
+    if (recenter) place();
+
+    // which controller drives the cursor: the one holding a press, otherwise the closest hit
+    let main = null;
+    for (const e of entries) {
+      const h = e.hitP || e.hitB; if (!h) continue;
+      if (down && down.s === e.s) { main = e; break; }
+      if (!main || h.distance < (main.hitP || main.hitB).distance) main = e;
+    }
+    for (const s of vr.slots) s.line.scale.z = 1;
+    let newHover = '';
+    if (main) {
+      const h = main.hitP || main.hitB;
+      main.s.line.scale.z = Math.max(0.05, h.distance / 3);
+      group.worldToLocal(local.copy(h.point)); cursor.position.set(local.x, local.y, 0.006); cursor.visible = true;
+      cursor.material.color.setHex(down ? 0x2ec4b6 : 0x1e66d0); cursor.scale.setScalar(down ? 0.7 : 1);
+      if (main.hitP && !main.hitB) lastUI = { x: main.hitP.uv.x * UI_W, y: (1 - main.hitP.uv.y) * UI_H };
+      if (main.hitB && !main.hitP) {
+        const px = main.hitB.uv.x * BAR_W;
+        for (const k in BTN) if (px >= BTN[k].x0 && px <= BTN[k].x1) newHover = k;
+      }
+    } else { cursor.visible = false; lastUI = null; }
+    if (newHover !== hoverBtn) { hoverBtn = newHover; drawBar(); }
+
+    // presses / drags / releases
+    for (const e of entries) {
+      if (e.press) {
+        if (e.hitB && !e.hitP) {
+          const px = e.hitB.uv.x * BAR_W;
+          if (px >= BTN.close.x0 && px <= BTN.close.x1) { buzz(e.s); App.playerApi.closeKioskXR(); return; }
+          if (px >= BTN.recenter.x0 && px <= BTN.recenter.x1) { buzz(e.s); place(); }
+        } else if (e.hitP && !down) {
+          const x = Math.round(e.hitP.uv.x * UI_W), y = Math.round((1 - e.hitP.uv.y) * UI_H);
+          down = { s: e.s, x, y, lx: x, ly: y, travel: 0 };
+          fire('pointerdown', x, y, 1); fire('mousedown', x, y, 1); buzz(e.s);
+        }
+      }
+      if (down && down.s === e.s) {
+        if (e.hitP) {
+          const x = Math.round(e.hitP.uv.x * UI_W), y = Math.round((1 - e.hitP.uv.y) * UI_H);
+          if (Math.hypot(x - down.lx, y - down.ly) > 4) { down.travel += Math.hypot(x - down.lx, y - down.ly); down.lx = x; down.ly = y; fire('pointermove', x, y, 1); fire('mousemove', x, y, 1); }
+        }
+        if (e.release || !e.sel) {
+          fire('pointerup', down.lx, down.ly, 0); fire('mouseup', down.lx, down.ly, 0);
+          if (down.travel < 30) fire('click', down.x, down.y, 0);             // a tap
+          down = null; afterInteract();
+        }
+      }
+      // thumbstick scrolling (either hand) while pointing at the panel
+      if (lastUI) {
+        const sx = dead(e.ax[2] || 0), sy = dead(e.ax[3] || 0);
+        if (sx || sy) {
+          if (scrollAt(lastUI.x, lastUI.y, sx * 900 * dt, sy * 900 * dt)) {
+            const now = performance.now();
+            if (now - lastScrollShot > 450) { lastScrollShot = now; clearTimeout(debTimer); debTimer = setTimeout(snapshot, 30); }
+            clearTimeout(settleTimer); settleTimer = setTimeout(snapshot, 500); idle = 0;
+          }
+        }
+      }
+    }
+  }
+
+  function open() {
+    active = true; ready = false; err = ''; hoverBtn = ''; down = null; lastUI = null; idle = 0; again = false;
+    for (const s of vr.slots) {                                                // the press that opened the kiosk must not also tap the page
+      const gp = s.input && s.input.gamepad; if (!gp) continue;
+      s.kSel = btnState(gp, 0) || btnState(gp, 4); s.kGrip = btnState(gp, 1); s.kB = btnState(gp, 5);
+    }
+    place(); group.visible = true;
+    drawPanelMsg(['Loading kiosk…']); drawBar();
+    ensureLib().catch(() => {});                                               // start fetching the renderer now
+    clearTimeout(debTimer); debTimer = setTimeout(snapshot, 700);              // the page restarts at the language screen; wait for it
+    clearTimeout(settleTimer); settleTimer = setTimeout(snapshot, 1800);
+  }
+  function close() {
+    if (!active && !group.visible) return;
+    active = false; group.visible = false; down = null; lastUI = null;
+    clearTimeout(debTimer); clearTimeout(settleTimer);
+    for (const s of vr.slots || []) s.line.scale.z = 1;
+  }
+  App.vrKiosk = { open, close, get active() { return active; } };
+  App.updatables.push({ update });
 }
 
 /* =====================================================================
@@ -4165,6 +4432,7 @@ setupShopLights(App);   // Stage 4: pooled shop lights
 setupPlayer(App);   // Stage 2: movement, collision, camera modes (also registers the orbit-preview update)
 setupNPCs(App);     // Stage 16: shoppers, staff, arcade players, bowlers, diners
 setupVR(App);       // Stage 17: WebXR / Meta Quest controllers + Enter VR button
+setupVRKiosk(App);  // Stage 18: kiosk UI on a floating panel in VR
 window.MALL_APP = App;   // handy for debugging in the browser console
 
 window.addEventListener('resize', () => {
